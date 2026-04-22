@@ -47,13 +47,23 @@ export interface ScpRecord {
 }
 
 // Parser types
+export type ColorName = "primary" | "secondary" | "accent" | "warn" | "error" | "text-dim";
+
 export type ParsedSegment =
   | { type: "text"; content: string }
   | { type: "ruby"; base: string; reading: string }
   | { type: "tag_link"; id: string }
   | { type: "corrupted"; original: string; display: string }
+  | { type: "color"; color: ColorName; content: ParsedSegment[] }
   | { type: "newline" }
   | { type: "divider" };
+
+export type CommandBranch = {
+  /** regex pattern string, or "*" for catch-all */
+  pattern: string;
+  /** flag key to set true when this branch matches */
+  flag: string;
+};
 
 export type ParsedLine =
   | { type: "system"; content: ParsedSegment[] }
@@ -63,7 +73,16 @@ export type ParsedLine =
   | { type: "prompt_prefix"; content: ParsedSegment[] }
   | { type: "paragraph"; content: ParsedSegment[] }
   | { type: "choice"; choices: string[]; variable: string }
-  | { type: "blank" };
+  | { type: "blank" }
+  | {
+      type: "command_input";
+      /** variable name (used as flag prefix) */
+      variable: string;
+      /** hint text shown in the input placeholder */
+      hint: string;
+      /** ordered branches; first match wins; "*" is catch-all */
+      branches: CommandBranch[];
+    };
 
 // UI types
 export interface BootMessage {
