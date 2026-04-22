@@ -1,24 +1,37 @@
-import type { ParsedLine, ParsedSegment } from "@/types";
+// Edited: 2026-04-22
+import type { ParsedLine, ParsedSegment, ColorName, CommandBranch } from "@/types";
 
 // Characters that trigger corruption display
 const CORRUPTION_MARKER = "\\x00";
 const TOFU_CHARS = ["\\uFFFD", "\\u0000", "\\u001A"];
 
 /**
- * Parse inline segments: ruby, tag links, corrupted text
+ * Parse inline segments: ruby, color, tag links, corrupted text
  */
 export function parseInlineSegments(text: string): ParsedSegment[] {
   const segments: ParsedSegment[] = [];
   let remaining = text;
 
   while (remaining.length > 0) {
+    // Color: {c:colorname}text{/c}
+    const colorMatch = remaining.match(/^([\s\S]*?)\{c:(primary|secondary|accent|warn|error|text-dim)\}([\s\S]*?)\{\/c\}/);
+    if (colorMatch) {
+      const [full, before, color, inner] = colorMatch;
+      if (before) segments.push(...parseRubyAndLinks(before));
+      segments.push({
+        type: "color",
+        color: color as ColorName,
+        content: parseRubyAndLinks(inner),
+      });
+      remaining = remaining.slice(full.length);
+      continue;
+    }
+
     // Ruby: ｜base《reading》
     const rubyMatch = remaining.match(/^([\s\S]*?)｜([^《]+)《([^》]+)》/);
     if (rubyMatch) {
       const [full, before, base, reading] = rubyMatch;
-      if (before) {
-        segments.push(...parseCorruptedSegments(before));
-      }
+      if (before) segments.push(...parseCorruptedSegments(before));
       segments.push({ type: "ruby", base, reading });
       remaining = remaining.slice(full.length);
       continue;
@@ -28,9 +41,7 @@ export function parseInlineSegments(text: string): ParsedSegment[] {
     const tagMatch = remaining.match(/^([\s\S]*?)\[\[([^\]]+)\]\]/);
     if (tagMatch) {
       const [full, before, id] = tagMatch;
-      if (before) {
-        segments.push(...parseCorruptedSegments(before));
-      }
+      if (before) segments.push(...parseCorruptedSegments(before));
       segments.push({ type: "tag_link", id: id.trim() });
       remaining = remaining.slice(full.length);
       continue;
@@ -45,14 +56,39 @@ export function parseInlineSegments(text: string): ParsedSegment[] {
 }
 
 /**
+ * Parse ruby and tag links (used inside color blocks)
+ */
+function parseRubyAndLinks(text: string): ParsedSegment[] {
+  const segments: ParsedSegment[] = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    const rubyMatch = remaining.match(/^([\s\S]*?)｜([^《]+)《([^》]+)》/);
+    if (rubyMatch) {
+      const [full, before, base, reading] = rubyMatch;
+      if (before) segments.push(...parseCorruptedSegments(before));
+      segments.push({ type: "ruby", base, reading });
+      remaining = remaining.slice(full.length);
+      continue;
+    }
+    const tagMatch = remaining.match(/^([\s\S]*?)\[\[([^\]]+)\]\]/);
+    if (tagMatch) {
+      const [full, before, id] = tagMatch;
+      if (before) segments.push(...parseCorruptedSegments(before));
+      segments.push({ type: "tag_link", id: id.trim() });
+      remaining = remaining.slice(full.length);
+      continue;
+    }
+    segments.push(...parseCorruptedSegments(remaining));
+    break;
+  }
+  return segments;
+}
+
+/**
  * Parse corrupted text (tofu/replacement chars)
  */
 function parseCorruptedSegments(text: string): ParsedSegment[] {
-  // Look for sequences of replacement characters or known corruption patterns
-  // In the source text: ██ or 文字化け patterns
   if (!text) return [];
-
-  // Split on corrupted blocks (sequences of ??? or ■ or similar)
   const parts = text.split(/([\u{FFFD}\u{25A0}\u{25A1}█▓▒░]+)/u);
   return parts
     .filter((p) => p.length > 0)
@@ -85,50 +121,34 @@ export function parseNovelContent(content: string): ParsedLine[] {
   for (const rawLine of lines) {
     const line = rawLine;
 
-    // Blank line
     if (line.trim() === "") {
       parsed.push({ type: "blank" });
       continue;
     }
 
-    // Divider line
     if (/^[─━\-－＝=]{3,}/.test(line.trim())) {
       parsed.push({ type: "divider" });
       continue;
     }
 
-    // System message: ＃ ...
     if (line.startsWith("＃")) {
       const content = line.slice(1).trim();
-      parsed.push({
-        type: "system",
-        content: parseInlineSegments(content),
-      });
+      parsed.push({ type: "system", content: parseInlineSegments(content) });
       continue;
     }
 
-    // Character speech: ＄ ...
     if (line.startsWith("＄")) {
       const content = line.slice(1).trim();
-      parsed.push({
-        type: "char",
-        speaker: "diary_owner",
-        content: parseInlineSegments(content),
-      });
+      parsed.push({ type: "char", speaker: "diary_owner", content: parseInlineSegments(content) });
       continue;
     }
 
-    // User/reader response: >>...
     if (line.startsWith(">>")) {
       const content = line.slice(2).trim();
-      parsed.push({
-        type: "user_input",
-        prompt: parseInlineSegments(content),
-      });
+      parsed.push({ type: "user_input", prompt: parseInlineSegments(content) });
       continue;
     }
 
-    // Prompt prefix: ＜...＞ choices
     if (line.includes("＜") && line.includes("＞")) {
       const choices: string[] = [];
       const choiceRegex = /＜([^＞]+)＞/g;
@@ -142,35 +162,41 @@ export function parseNovelContent(content: string): ParsedLine[] {
       }
     }
 
-    // Regular paragraph
-    parsed.push({
-      type: "paragraph",
-      content: parseInlineSegments(line),
-    });
+    // Command input: ？variable:hint｜pattern1=flag1｜pattern2=flag2｜*=fallback
+    if (line.startsWith("？")) {
+      const body = line.slice(1);
+      const parts = body.split("｜");
+      const [varHint, ...branchParts] = parts;
+      const colonIdx = varHint.indexOf(":");
+      const variable = colonIdx >= 0 ? varHint.slice(0, colonIdx).trim() : varHint.trim();
+      const hint     = colonIdx >= 0 ? varHint.slice(colonIdx + 1).trim() : "";
+      const branches: CommandBranch[] = branchParts
+        .map((b) => {
+          const eq = b.indexOf("=");
+          if (eq < 0) return null;
+          return { pattern: b.slice(0, eq).trim(), flag: b.slice(eq + 1).trim() };
+        })
+        .filter((b): b is CommandBranch => b !== null);
+      parsed.push({ type: "command_input", variable, hint, branches });
+      continue;
+    }
+
+    parsed.push({ type: "paragraph", content: parseInlineSegments(line) });
   }
 
   return parsed;
 }
 
-/**
- * Apply corruption based on flags - replaces content with corrupted display
- */
 export function applyCorruption(
   content: string,
   corruptionLevel: number,
   unlockedFlags: Record<string, boolean | string | number>
 ): string {
   if (corruptionLevel === 0) return content;
-
-  // If flag "identity_revealed" is set, remove corruption
   if (unlockedFlags["identity_revealed"]) return content;
-
   return content;
 }
 
-/**
- * Check if an entry is accessible given current flags
- */
 export function isEntryAccessible(
   requiredFlags: string[],
   userFlags: Record<string, boolean | string | number>
