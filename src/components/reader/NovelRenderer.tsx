@@ -1,4 +1,5 @@
 "use client";
+// Edited: 2026-04-22
 
 import {
   useCallback,
@@ -8,7 +9,7 @@ import {
   useState,
 } from "react";
 import { parseNovelContent } from "@/lib/parser";
-import type { ParsedLine, ParsedSegment } from "@/types";
+import type { ParsedLine, ParsedSegment, CommandBranch } from "@/types";
 import { InlineCard } from "@/components/ui/InlineCard";
 import { CorruptedBlock } from "@/components/ui/GlitchText";
 
@@ -16,6 +17,13 @@ interface NovelRendererProps {
   content: string;
   entryType: string;
   onChoice?: (choice: string, variable: string) => void;
+  onComplete?: () => void;
+  /** Called when the reader submits a command on a command_input line */
+  onCommandInput?: (input: string, variable: string, branches: CommandBranch[]) => void;
+  /** Called when a command_input line enters the viewport and becomes the active prompt */
+  onActivateCommandLine?: (lineIndex: number) => void;
+  /** Index of the command_input line currently awaiting input, or null */
+  pendingCommandLine?: number | null;
   corruptionLevel?: number;
   revealedFlags?: Record<string, boolean | string | number>;
 }
@@ -46,6 +54,10 @@ export function NovelRenderer({
   content,
   entryType,
   onChoice,
+  onComplete,
+  onCommandInput,
+  onActivateCommandLine,
+  pendingCommandLine = null,
   corruptionLevel = 0,
   revealedFlags = {},
 }: NovelRendererProps) {
@@ -55,6 +67,7 @@ export function NovelRenderer({
   const containerRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
   const activeTimers = useRef<Map<number, ReturnType<typeof setInterval>>>(new Map());
+  const completedRef = useRef(false); // fire onComplete only once per content
 
   // Parse on content change
   useEffect(() => {
@@ -62,10 +75,23 @@ export function NovelRenderer({
     setLines(parsed);
     setRevealed(new Array(parsed.length).fill(-1));
     rowRefs.current = new Array(parsed.length).fill(null);
+    completedRef.current = false;
     // Clear any running timers from previous content
     activeTimers.current.forEach((t) => clearInterval(t));
     activeTimers.current.clear();
   }, [content]);
+
+  // Detect when all lines are fully revealed
+  useEffect(() => {
+    if (completedRef.current) return;
+    if (lines.length === 0) return;
+    if (revealed.length !== lines.length) return;
+    const allDone = revealed.every((r) => r === Infinity);
+    if (allDone) {
+      completedRef.current = true;
+      onComplete?.();
+    }
+  }, [revealed, lines, onComplete]);
 
   // Start typing animation for line i
   const startTyping = useCallback(
@@ -128,6 +154,9 @@ export function NovelRenderer({
           entries.forEach((entry) => {
             if (entry.isIntersecting) {
               startTyping(i, line);
+              if (line.type === "command_input") {
+                onActivateCommandLine?.(i);
+              }
               obs.disconnect(); // fire once
             }
           });
@@ -166,6 +195,8 @@ export function NovelRenderer({
             line={line}
             revealedChars={revealed[i] ?? -1}
             onChoice={onChoice}
+            onCommandInput={onCommandInput}
+            isActiveCommandLine={pendingCommandLine === i}
             corruptionLevel={corruptionLevel}
             revealedFlags={revealedFlags}
           />
@@ -183,7 +214,7 @@ export function NovelRenderer({
 
 /** Count total plain-text characters in a line (for typing progress) */
 function getPlainLength(line: ParsedLine): number {
-  if (line.type === "blank" || line.type === "divider" || line.type === "choice") return 0;
+  if (line.type === "blank" || line.type === "divider" || line.type === "choice" || line.type === "command_input") return 0;
   const segs = "content" in line ? line.content : "prompt" in line ? line.prompt : [];
   return (segs as ParsedSegment[]).reduce((sum, seg) => {
     if (seg.type === "text") return sum + seg.content.length;
@@ -203,6 +234,8 @@ interface RenderLineProps {
   /** chars revealed so far; -1 = not started (invisible), Infinity = complete */
   revealedChars: number;
   onChoice?: (choice: string, variable: string) => void;
+  onCommandInput?: (input: string, variable: string, branches: CommandBranch[]) => void;
+  isActiveCommandLine?: boolean;
   corruptionLevel: number;
   revealedFlags: Record<string, boolean | string | number>;
 }
@@ -211,6 +244,8 @@ function RenderLine({
   line,
   revealedChars,
   onChoice,
+  onCommandInput,
+  isActiveCommandLine = false,
   corruptionLevel,
   revealedFlags,
 }: RenderLineProps) {
@@ -286,6 +321,18 @@ function RenderLine({
           onChoice={onChoice}
         />
       ) : null;
+
+    case "command_input":
+      // Only show once this line is in viewport (revealedChars !== -1)
+      return revealedChars !== -1 ? (
+        <CommandInputLine
+          variable={line.variable}
+          hint={line.hint}
+          branches={line.branches}
+          isActive={isActiveCommandLine}
+          onSubmit={onCommandInput}
+        />
+      ) : <div className="h-7 w-full" aria-hidden />;
 
     case "paragraph":
       return (
@@ -408,6 +455,15 @@ function SegmentFull({
   seg: ParsedSegment;
   flags: Record<string, boolean | string | number>;
 }) {
+  const COLOR_MAP: Record<string, string> = {
+    primary: "var(--color-primary)",
+    secondary: "var(--color-secondary)",
+    accent: "var(--color-accent)",
+    warn: "var(--color-warn)",
+    error: "var(--color-error)",
+    "text-dim": "var(--color-text-dim)",
+  };
+
   switch (seg.type) {
     case "text":
       return <>{seg.content}</>;
@@ -420,6 +476,14 @@ function SegmentFull({
       );
     case "tag_link":
       return <InlineCard id={seg.id} />;
+    case "color":
+      return (
+        <span style={{ color: COLOR_MAP[seg.color] ?? "inherit" }}>
+          {seg.content.map((inner, i) => (
+            <span key={i}><SegmentFull seg={inner} flags={flags} /></span>
+          ))}
+        </span>
+      );
     case "corrupted":
       if (flags["identity_revealed"]) {
         return <span className="text-primary-dim">{seg.original}</span>;
@@ -489,6 +553,96 @@ function SegmentRemainder({
 // ──────────────────────────────────────────────────────────────────────────────
 // ChoiceButtons
 // ──────────────────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CommandInputLine — inline input prompt activated when this line is reached
+// ──────────────────────────────────────────────────────────────────────────────
+
+function CommandInputLine({
+  variable,
+  hint,
+  branches,
+  isActive,
+  onSubmit,
+}: {
+  variable: string;
+  hint: string;
+  branches: CommandBranch[];
+  isActive: boolean;
+  onSubmit?: (input: string, variable: string, branches: CommandBranch[]) => void;
+}) {
+  const [value, setValue] = useState("");
+  const [submitted, setSubmitted] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-focus when this line becomes active
+  useEffect(() => {
+    if (isActive && !submitted) {
+      inputRef.current?.focus();
+    }
+  }, [isActive, submitted]);
+
+  function handleSubmit() {
+    const trimmed = value.trim();
+    if (!trimmed || submitted) return;
+    setSubmitted(trimmed);
+    onSubmit?.(trimmed, variable, branches);
+  }
+
+  if (submitted) {
+    // Show the submitted command as a frozen user_input line
+    return (
+      <div className="flex items-start gap-2 py-0.5 pl-4">
+        <span className="text-secondary shrink-0 select-none">&gt;&gt;</span>
+        <span className="text-secondary italic">{submitted}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="flex items-center gap-2 py-1.5 pl-4"
+      style={{ opacity: isActive ? 1 : 0.35, transition: "opacity 0.3s" }}
+    >
+      <span
+        className="shrink-0 select-none"
+        style={{ color: isActive ? "var(--color-secondary)" : "var(--color-muted)" }}
+      >
+        &gt;&gt;
+      </span>
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        disabled={!isActive}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") handleSubmit();
+        }}
+        placeholder={isActive ? (hint || "コマンドを入力...") : "[LOCKED]"}
+        autoComplete="off"
+        spellCheck={false}
+        className="flex-1 bg-transparent outline-none text-sm font-mono"
+        style={{
+          color: "var(--color-secondary)",
+          caretColor: "var(--color-primary)",
+        }}
+      />
+      {isActive && value && (
+        <button
+          onClick={handleSubmit}
+          className="text-xs px-2 py-0.5 border transition-colors"
+          style={{
+            borderColor: "var(--color-secondary)",
+            color: "var(--color-secondary)",
+          }}
+        >
+          SEND
+        </button>
+      )}
+    </div>
+  );
+}
 
 function ChoiceButtons({
   choices,
