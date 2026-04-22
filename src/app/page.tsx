@@ -86,8 +86,18 @@ export default async function HomePage() {
           </div>
         )}
 
+        {/* Terminal link */}
+        <div className="mt-6 text-center">
+          <Link
+            href="/terminal"
+            className="inline-block border border-border-bright text-dim text-xs px-4 py-2 hover:border-primary hover:text-primary transition-all duration-200"
+          >
+            ▶ KAI-TERMINAL — 端末アクセス
+          </Link>
+        </div>
+
         {/* Footer */}
-        <div className="mt-10 text-center text-muted text-xs">
+        <div className="mt-6 text-center text-muted text-xs">
           <div>海蝕現象収束機関 九重支部 — INTERNAL SYSTEM</div>
           <div className="mt-1">UNAUTHORIZED ACCESS IS PROHIBITED</div>
         </div>
