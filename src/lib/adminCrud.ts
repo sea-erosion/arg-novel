@@ -2,6 +2,7 @@
 // Generic CRUD helpers for data record tables
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { InValue } from "@libsql/client";
 import { v4 as uuidv4 } from "uuid";
 
 export type TableName = "anomalies" | "facilities" | "modules" | "staff" | "incidents";
@@ -20,7 +21,7 @@ export async function createRecord(table: TableName, body: Record<string, unknow
   try {
     const id = uuidv4();
     const fields = Object.keys(body);
-    const values = Object.values(body);
+    const values = Object.values(body) as InValue[];
     const placeholders = fields.map(() => "?").join(", ");
     await db.execute({
       sql: `INSERT INTO ${table} (id, ${fields.join(", ")}) VALUES (?, ${placeholders})`,
@@ -47,7 +48,7 @@ export async function getRecord(table: TableName, id: string) {
 export async function updateRecord(table: TableName, id: string, body: Record<string, unknown>) {
   try {
     const fields = Object.keys(body);
-    const values = Object.values(body);
+    const values = Object.values(body) as InValue[];
     const setClause = fields.map(f => `${f} = ?`).join(", ");
     await db.execute({
       sql: `UPDATE ${table} SET ${setClause} WHERE id = ?`,
