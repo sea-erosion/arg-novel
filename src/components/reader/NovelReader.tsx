@@ -8,7 +8,7 @@ import { NovelRenderer } from "@/components/reader/NovelRenderer";
 import { TerminalInput } from "@/components/terminal/TerminalInput";
 import { StatusBar } from "@/components/ui/StatusBar";
 import { getSessionId } from "@/lib/session";
-import type { BootMessage, Entry, Novel } from "@/types";
+import type { BootMessage, CommandBranch, Entry, Novel } from "@/types";
 
 interface NovelReaderProps {
   novel: Novel;
@@ -24,6 +24,9 @@ export function NovelReader({ novel }: NovelReaderProps) {
   const [sessionId, setSessionId] = useState("");
   const [inputHistory, setInputHistory] = useState<string[]>([]);
   const [systemMessages, setSystemMessages] = useState<string[]>([]);
+  const [isFinished, setIsFinished] = useState(false);
+  /** Index of the command_input line currently awaiting input; null = terminal input active */
+  const [pendingCommandLine, setPendingCommandLine] = useState<number | null>(null);
 
   // Boot messages from novel config
   const bootMessages: BootMessage[] = JSON.parse(novel.boot_sequence || "[]");
@@ -69,6 +72,8 @@ export function NovelReader({ novel }: NovelReaderProps) {
   const handleSelectEntry = useCallback(
     async (entry: Entry) => {
       setCurrentEntry(entry);
+      setIsFinished(false);
+      setPendingCommandLine(null);
       if (!unlockedEntries.includes(entry.id)) {
         // Mark as read and apply unlock flags
         try {
@@ -120,6 +125,68 @@ export function NovelReader({ novel }: NovelReaderProps) {
       } catch (e) {
         console.error(e);
       }
+    },
+    [sessionId, novel.id]
+  );
+
+  const handleCommandInput = useCallback(
+    async (input: string, variable: string, branches: CommandBranch[]) => {
+      setInputHistory((prev) => [input, ...prev].slice(0, 50));
+
+      // Match input against branches in order; first match wins
+      let matchedFlag: string | null = null;
+      for (const branch of branches) {
+        if (branch.pattern === "*") {
+          matchedFlag = branch.flag;
+          // don't break — keep looking for a real match first
+          continue;
+        }
+        try {
+          const re = new RegExp(branch.pattern, "i");
+          if (re.test(input)) {
+            matchedFlag = branch.flag;
+            break;
+          }
+        } catch {
+          // invalid regex — treat as literal substring match
+          if (input.toLowerCase().includes(branch.pattern.toLowerCase())) {
+            matchedFlag = branch.flag;
+            break;
+          }
+        }
+      }
+
+      if (matchedFlag) {
+        const flagKey = `${variable}_${matchedFlag}`;
+        try {
+          const res = await fetch("/api/unlock", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session_id: sessionId,
+              novel_id: novel.id,
+              flag_key: flagKey,
+              flag_value: true,
+            }),
+          });
+          const data = await res.json();
+          setFlags(data.flags || {});
+          setUnlockedEntries(data.unlocked_entries || []);
+          setProgress(data.progress || 0);
+
+          // Refresh entries in case new ones unlocked
+          const entriesRes = await fetch(
+            `/api/entries?novel_id=${novel.id}&session_id=${sessionId}`
+          );
+          const entriesData = await entriesRes.json();
+          setEntries(entriesData.entries || []);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+
+      // Release the command line lock — terminal input re-enabled
+      setPendingCommandLine(null);
     },
     [sessionId, novel.id]
   );
@@ -267,6 +334,10 @@ export function NovelReader({ novel }: NovelReaderProps) {
                     content={currentEntry.content}
                     entryType={currentEntry.entry_type}
                     onChoice={handleChoice}
+                    onComplete={() => setIsFinished(true)}
+                    onCommandInput={handleCommandInput}
+                    onActivateCommandLine={setPendingCommandLine}
+                    pendingCommandLine={pendingCommandLine}
                     corruptionLevel={flags["corruption_level"] as number || 0}
                     revealedFlags={flags}
                   />
@@ -303,6 +374,7 @@ export function NovelReader({ novel }: NovelReaderProps) {
                 onSubmit={handleInput}
                 history={inputHistory}
                 placeholder="コマンドを入力... (help で一覧)"
+                disabled={isFinished || pendingCommandLine !== null}
               />
             </main>
           </div>
